@@ -1,0 +1,357 @@
+#!/bin/bash
+
+#
+# sql_run_parts
+#
+# Executes Oracle SQL scripts found in a directory.  Spooling and logging are
+# taken care of.
+#
+# Environment variables:
+#
+#    ORACLE_HOME, ORACLE_SID, ORA_SQL_DATE_FORMAT
+#
+# Example of call:
+#
+#    sql_run_parts -d <SQL_PATH> -l <LOG_PATH> -s <SPOOL_PATH>
+#
+# If the special LOG_PATH :syslog: is defined, log entries are sent to the
+# system logging daemon.
+#
+################################################################################
+
+script_name=sql_run_parts
+script_version=0.1
+
+
+#
+# utilities
+################################################################################
+
+#
+# date
+#
+# Wraps the system command date(1).
+#
+# Example of call:
+#
+#    date
+#
+# Global variables:
+#
+#    ORA_SQL_DATE_FORMAT
+#
+# Local variables:
+#
+#    $*
+#
+
+function date()
+{
+	command date ${ORA_SQL_DATE_FORMAT:---rfc-3339=seconds} $*
+}
+
+
+#
+# logger_file
+#
+# Writes a log entry to a file.
+#
+# Example of call:
+#
+#    logger_file "The quick brown fox jumps over the lazy dog"
+#
+# Global variables:
+#
+#    LOG_PATH
+#
+# Local variables:
+#
+#    $@
+#
+
+function logger_file()
+{
+	echo "$(date)  $@" | tee -a "$LOG_PATH"
+}
+
+
+#
+# logger_syslog
+#
+# Writes a log entry to the system logging daemon.
+#
+# Example of call:
+#
+#    logger_file "The quick brown fox jumps over the lazy dog"
+#
+# Global variables:
+#
+#    none
+#
+# Local variables:
+#
+#    $@
+#
+
+function logger_syslog()
+{
+	command logger -s "$@"
+}
+
+
+#
+# usage
+#
+# Prints usage information.
+#
+# Example of call:
+#
+#    usage
+#
+# Global variables:
+#
+#    script_name
+#
+# Local variables:
+#
+#    none
+#
+
+function usage()
+{
+    cat <<-EOF
+		Usage:
+
+		    $script_name -d <SQL_PATH> -l <LOG_PATH> -s <SPOOL_PATH> [ -D ]
+
+		Options:
+
+		   -d      path of directory containing Oracle SQL files (mandatory)
+		   -l      path of log file (or system logging facility if :syslog: is used)
+		   -s      path for spool files to be written to
+		   -D      dry run (does not actually run SQL code)
+		   -h      display this help and exit
+		   -V      output version information and exit
+
+	EOF
+} 
+
+
+#
+# version
+#
+# Prints version information.
+#
+# Example of call:
+#
+#    version
+#
+# Global variables:
+#
+#    script_name, script_version
+#
+# Local variables:
+#
+#    none
+#
+
+function version()
+{
+    cat <<-EOF
+		$script_name (ver. $script_version)
+		
+		Purpose:
+
+		    executes Oracle SQL scripts found in a directory
+	EOF
+} 
+
+
+#
+# core
+################################################################################
+
+#
+# run_sql
+#
+# Executes Oracle SQL code as found in file $1.  If $2 is specified, runtime
+# output is spooled to file $2.
+#
+# Example of call:
+#
+#    run_sql <SQL_FILE> <SPOOL_FILE>
+#
+# Global variables:
+#
+#    none
+#
+# Local variables:
+#
+#    sql_file, spool_file
+#
+
+function run_sql()
+{
+	local sql_file="$1"
+    local spool_file="${2:-/dev/null}"
+
+	"$ORACLE_HOME/bin/sqlplus" -s <<-EOF
+		/ as sysdba
+		SET SERVEROUTPUT ON
+		SET VERIFY OFF
+		WHENEVER SQLERROR EXIT SQL.SQLCODE
+		WHENEVER OSERROR EXIT
+		SPOOL $spool_file APPEND
+		@$sql_file
+		SPOOL OFF
+		EXIT
+	EOF
+	return $?
+}
+
+
+#
+# run_sql_parts
+#
+# Executes Oracle SQL code as found in file $1.  If $2 is specified, runtime
+# output is spooled to file $2.
+#
+# Example of call:
+#
+#    run_sql_parts <SQL_PATH> <SPOOL_PATH>
+#
+# Global variables:
+#
+#    SQL_PATH, SPOOL_PATH, DRY_RUN
+#
+# Local variables:
+#
+#    sql_file, sql_exit_code
+#
+
+function run_sql_parts()
+{
+    local sql_file
+    local sql_exit_code
+
+	$logger "Entering path [$SQL_PATH]."
+
+    find "$SQL_PATH" -type f -name "*.sql" |  \
+    while read sql_file
+    do
+		[[ -n "$SPOOL_PATH" ]] && {
+			spool_file="$SPOOL_PATH/$(basename "$sql_file" .sql)-$(uuidgen).txt"
+			$logger "Executing SQL file [$sql_file].  Spool is [$spool_file]."
+		} || {
+			$logger "Executing SQL file [$sql_file]."
+		}
+
+		[[ -n "$DRY_RUN" ]] || run_sql "$sql_file" "$spool_file"
+		sql_exit_code=$?
+
+		$logger "SQL file [$sql_file] executed with exit code [$sql_exit_code]."
+    done
+
+	$logger "Exiting from path [$SQL_PATH]."
+}
+
+
+#
+# parsing of command options
+################################################################################
+
+SQL_PATH=
+LOG_PATH=
+SPOOL_PATH=
+DRY_RUN=
+
+while getopts "d:l:s:DhV" OPTION
+do
+    case $OPTION in
+		d)
+			SQL_PATH="$OPTARG"
+			;;
+		l)
+			LOG_PATH="$OPTARG"
+			;;
+		s)
+			SPOOL_PATH="$OPTARG"
+			;;
+		D)
+			DRY_RUN=1
+			;;
+		h)
+			version
+			echo
+			usage
+			exit 1
+			;;
+		V)
+			version
+			exit
+			;;
+		?)
+			usage
+			exit
+			;;
+    esac
+done
+
+
+#
+# performing a sanity check of global variables
+################################################################################
+
+# SQL_PATH must be defined
+
+[[ -n "$SQL_PATH" ]] || {
+	echo "SQL_PATH cannot be empty."
+	usage
+	exit 1
+}
+
+# SQL_PATH must exist
+
+[[ -d "$SQL_PATH" ]] || {
+	echo "SQL_PATH [$SQL_PATH] does not exist."
+	exit 1
+}
+
+# if define SPOOL_PATH must exist
+
+[[ -z "$SPOOL_PATH" || -d "$SPOOL_PATH" ]] || {
+	echo "SPOOL_PATH [$SPOOL_PATH] does not exist."
+	exit 1
+}
+
+
+#
+# choosing a logging mode
+################################################################################
+
+if [[ -z "$LOG_PATH" ]]; then
+	logger=echo
+
+elif [[ "$LOG_PATH" == ":syslog:" ]]; then
+	logger=logger_syslog
+
+else  # if defined, LOG_PATH must be writable
+
+	touch "$LOG_PATH" || {
+		echo "Cannot open LOG_PATH [$LOG_PATH] for writing."
+		exit 1
+	}
+
+	logger=logger_file
+fi
+
+
+#
+# running the main loop
+################################################################################
+
+run_sql_parts "$SQL_PATH" "$SPOOL_PATH"
+exit $?
+
+
+# ex: ts=4 sw=4 et filetype=sh noexpandtab

@@ -1,0 +1,133 @@
+#!/bin/bash
+
+#
+# purge_applied_logs
+#
+# Generates RMAN script to purge applied logs on a standby instance
+#
+# Environment variables:
+#
+#    ORACLE_HOME, ORACLE_SID
+#
+# Example of call:
+#
+#    purge_applied_logs [-v]
+#
+################################################################################
+
+source bashlet :oracle::sqlplus
+source bashlet basic::myself
+
+#
+# utilities
+################################################################################
+
+#
+# usage
+#
+# Print usage information.
+#
+# Dependencies:
+#
+#    bashlet basic/myself
+#
+
+function usage()
+{
+    cat <<-EOF
+	Usage:
+
+	    $(myself get_name) [-v]
+
+	Options:
+
+	    -v      verbose mode
+	    -h      display this help and exit
+	EOF
+} 
+
+
+#
+# the main function
+################################################################################
+
+#
+# applied_logs_to_rman_script
+#
+# Generates RMAN script to purge applied logs on a standby instance
+#
+# Dependencies:
+#
+#    bashlet :oracle/sqlplus
+#
+
+function applied_logs_to_rman_script()
+{
+	local query rman_script
+	local seq_thread_pair
+
+	local query="
+        SELECT
+            MAX(sequence#)||':'||thread#
+        FROM
+            v\$archived_log
+        WHERE
+            applied = 'YES' AND registrar = 'RFS' AND resetlogs_change# =
+                (
+                    SELECT
+                        resetlogs_change#
+                    FROM
+                        v\$database
+                )
+            GROUP BY
+                thread#"
+
+    for seq_thread_pair in $(:sqlplus execute "$query")
+    do
+        local seq_number=${seq_thread_pair%:*}
+        local thread_number=${seq_thread_pair#*:}
+
+        rman_script+="delete noprompt force archivelog "
+        rman_script+="until sequence $seq_number thread $thread_number;"
+    done
+
+    rman_script="run { $rman_script }"
+
+    echo "$rman_script"
+}
+
+
+#
+# command line parsing
+################################################################################
+
+while getopts "vh" opt; do
+    case "${opt}" in
+        v)
+            verbose=verbose  # currently not implemented
+            ;;
+        h)
+            usage && exit 0
+            ;;
+        *)
+            usage && exit 1
+            ;;
+    esac
+done
+shift $((OPTIND-1))
+
+
+#
+# core
+################################################################################
+
+applied_logs_to_rman_script
+
+
+# Local variables:
+# mode: shell-script
+# sh-basic-offset: 4
+# sh-indent-comment: t
+# indent-tabs-mode: nil
+# End:
+# ex: ts=4 sw=4 et filetype=sh

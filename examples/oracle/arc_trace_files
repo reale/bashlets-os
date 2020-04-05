@@ -1,0 +1,165 @@
+#!/bin/bash
+
+#
+# arc_trace_files
+#
+# Archiviate Oracle Database trace files.
+#
+# Environment variables:
+#
+#    ORACLE_HOME, ORACLE_SID
+#
+# Example of call:
+#
+#    arc_trace_files -2 <arc_dest> [-1 <bdump_dest>] [-r <retention>] [-v [-D]] [-d]
+#
+################################################################################
+
+
+source bashlet basic::myself
+source bashlet datatype::counter
+source bashlet :oracle::sqlplus
+
+#
+# utilities
+################################################################################
+
+#
+# usage
+#
+# Print usage information.
+#
+# Dependencies:
+#
+#    bdump_dest, bashlet basic/myself, retention
+#
+
+function usage()
+{
+    cat <<-EOF
+	Usage:
+
+	    $(myself get_name) -2 <arc_dest> [-1 <bdump_dest>] [-r <retention>] [-v [-D]]
+
+	Options:
+
+	    -2      path of archival destination (mandatory)
+	    -1      path of Oracle Database background dumps (default: $bdump_dest)
+	    -d      dry mode (does not actually perform archiving)
+	    -r      retention (default: $retention)
+	    -v      verbose mode
+	    -D      when in verbose mode, prepend date to each line of output
+	    -h      display this help and exit
+	EOF
+} 
+
+
+#
+# verbose
+#
+# Verbose echo.
+#
+# Dependencies:
+#
+#    none
+#
+
+function verbose()
+{
+    local verbose_fmt="${verbose_fmt-\$*}"
+    eval echo "$verbose_fmt"
+}
+
+#
+# guess_bdump_dest
+#
+# Try to guess the backgroup dump destination.
+#
+# Dependencies:
+#
+#    bashlet :oracle/sqlplus
+#
+
+function guess_bdump_dest()
+{
+    local query="SELECT value FROM v\$parameter WHERE name = 'background_dump_dest'";
+
+    :sqlplus execute "$query" | tr -d "\n"
+}
+
+
+
+#
+# global variables
+################################################################################
+
+dry_mode=
+retention=10
+verbose=:
+[[ -z "$bdump_dest" ]] && bdump_dest="$(guess_bdump_dest)"
+
+
+#
+# command line parsing
+################################################################################
+
+while getopts "1:2:dr:vDh" opt; do
+    case "${opt}" in
+        1)
+            bdump_dest=${OPTARG}
+            ;;
+        2)
+            arc_dest=${OPTARG}
+            ;;
+        d)
+            dry_mode=1
+            ;;
+        r)
+            retention=${OPTARG}
+            ;;
+        v)
+            verbose=verbose
+            ;;
+        D)
+            verbose_fmt='[$(date)] $*'
+            ;;
+        h)
+            usage
+            ;;
+        *)
+            usage && exit 1
+            ;;
+    esac
+done
+shift $((OPTIND-1))
+
+[[ $# -gt 0 || -z "$bdump_dest" || "$bdump_dest" == "?" || -z "$arc_dest" ]] && usage && exit 1
+
+
+#
+# core
+################################################################################
+
+count_tr_files=$(counter create)
+
+find "$bdump_dest" -type f -mtime +"$retention" | while read tr_file
+do
+    if [[ "$dry_mode" -ne 1 ]]
+    then
+        gzip -c "$tr_file" > "$arc_dest/$(basename "$tr_file").gz"
+        rm -f "$tr_file"
+    fi
+    $verbose "Archived trace file $tr_file."
+    counter increase "$count_tr_files"
+done
+
+[[ "$(counter get "$count_tr_files")" -eq 0 ]] && $verbose "No trace file needs archiving!"
+
+
+# Local variables:
+# mode: shell-script
+# sh-basic-offset: 4
+# sh-indent-comment: t
+# indent-tabs-mode: nil
+# End:
+# ex: ts=4 sw=4 et filetype=sh
